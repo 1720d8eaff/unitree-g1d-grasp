@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "artifact_type": "g1_left_grasp_verified_orientation_reference",
+  "frame_id": "torso_link",
+  "quaternion_xyzw": [
+    0.5931438846508401,
+    0.44928508320548216,
+    -0.343522559050556,
+    0.5729882176220653
+  ],
+  "source_plan_generated_unix_time": 1788424120.2420006,
+  "source": "operator-verified arm-only AnyGrasp target orientation",
+  "position_is_locked": false,
+  "maximum_live_approach_deviation_rad": 0.3490658503988659
+}

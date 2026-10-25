@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "role": "laptop",
+  "allows_arm": false,
+  "allows_real_execution": false,
+  "processes": [
+    {
+      "name": "moveit",
+      "startup_grace_sec": 3.0,
+      "ready_timeout_sec": 90.0,
+      "ready_patterns": ["G1-D 笔记本控制链启动完成"],
+      "command": "set -eo pipefail; exec @PROJECT_ROOT@/laptop/startup/start_g1_control.sh"
+    },
+    {
+      "name": "anygrasp_server",
+      "startup_grace_sec": 5.0,
+      "ready_timeout_sec": 180.0,
+      "ready_patterns": ["AnyGrasp slanted/stable server ready."],
+      "command": "set -eo pipefail; source \"$(conda info --base)/etc/profile.d/conda.sh\"; conda activate anygrasp; export ANYGRASP_SDK_ROOT=/home/yii/anygrasp_sdk/grasp_detection; export ANYGRASP_CHECKPOINT=/home/yii/下载/checkpoint_detection.tar; export ANYGRASP_SHOW_VISUALIZATION=1; cd \"$ANYGRASP_SDK_ROOT\"; exec python3 -u @PROJECT_ROOT@/laptop/anygrasp/server_slanted_stable.py"
+    },
+    {
+      "name": "selector",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 30.0,
+      "ready_patterns": ["Listening UDP"],
+      "command": "set -eo pipefail; source /opt/ros/humble/setup.bash; source /home/yii/g1_ws/install/setup.bash; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; export CYCLONEDDS_URI=/home/yii/cyclonedds_ws/cyclonedds.xml; export ROS_DOMAIN_ID=0; export ROS_LOCALHOST_ONLY=0; exec python3 @PROJECT_ROOT@/laptop/anygrasp/anygrasp_left_auto_selector.py"
+    }
+  ]
+}

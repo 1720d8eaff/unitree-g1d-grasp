@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "artifact_type": "g1_left_integrated_visual_micro_adjustment",
+  "single_bounded_adjustment": true,
+  "program_contains_arm_disarm_calls": false,
+  "program_contains_hand_commands": false,
+  "generated_unix_time": 1788492029.000757,
+  "joint_names": [
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint"
+  ],
+  "point_count": 3,
+  "start_positions_rad": [
+    -1.1708828210830688,
+    0.5689031481742859,
+    -1.457641363143921,
+    0.13228188455104828,
+    -0.10308830440044403,
+    1.1681383848190308,
+    -0.6682763695716858
+  ],
+  "actual_tcp_before_adjustment": {
+    "frame_id": "torso_link",
+    "position_m": [
+      0.31388993642809193,
+      0.095779770365246,
+      -0.05673366825581383
+    ],
+    "quaternion_xyzw": [
+      0.6271486813372786,
+      0.42481644359141674,
+      -0.3244086599290352,
+      0.5665461517955099
+    ]
+  },
+  "fresh_visual_target": {
+    "frame_id": "torso_link",
+    "position_m": [
+      0.35574350359108603,
+      0.1483038350068387,
+      -0.027423976253349875
+    ],
+    "quaternion_xyzw": [
+      0.632156173819354,
+      0.38472257991379416,
+      -0.2930723901779065,
+      0.6053723503117384
+    ]
+  },
+  "bounded_micro_target": {
+    "frame_id": "torso_link",
+    "position_m": [
+      0.3144611036425419,
+      0.09649655571298218,
+      -0.056333684783144995
+    ],
+    "quaternion_xyzw": [
+      0.6271486813372786,
+      0.42481644359141674,
+      -0.3244086599290352,
+      0.5665461517955099
+    ]
+  },
+  "full_position_residual_m": 0.07327725769992191,
+  "full_orientation_residual_rad": 0.12842811349397243,
+  "maximum_translation_step_m": 0.001,
+  "maximum_rotation_step_rad": 0.0,
+  "maximum_joint_detour_rad": 0.0,
+  "input_trajectory_duration_sec": 0.144554698,
+  "expected_total_after_relay_sec": 3.7805953692000003,
+  "maximum_speed_after_relay_rad_sec": 0.007836026399392296,
+  "trajectory_sha256": "7637ac7e663c37a369dcdab537238b5368bb6112a9a6ea7362efa466d76c054c"
+}

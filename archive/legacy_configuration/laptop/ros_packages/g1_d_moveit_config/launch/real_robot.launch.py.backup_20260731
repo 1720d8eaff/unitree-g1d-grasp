@@ -1,0 +1,53 @@
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+from moveit_configs_utils import MoveItConfigsBuilder
+from moveit_configs_utils.launches import generate_move_group_launch
+
+
+def generate_launch_description():
+
+    moveit_config = (
+        MoveItConfigsBuilder(
+            "G1_D",
+            package_name="g1_d_moveit_config"
+        )
+        .to_moveit_configs()
+    )
+
+
+    move_group = generate_move_group_launch(moveit_config)
+
+
+    robot_description = {
+        "robot_description": moveit_config.robot_description
+    }
+
+
+    robot_state_publisher = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        output="screen",
+        parameters=[
+            moveit_config.robot_description,
+        ],
+    )
+
+
+    rviz_node = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        output="screen",
+        arguments=[
+            "-d",
+            str(moveit_config.package_path / "config" / "moveit.rviz")
+        ],
+    )
+
+
+    return LaunchDescription([
+        robot_state_publisher,
+        move_group,
+        rviz_node,
+    ])

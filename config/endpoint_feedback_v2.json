@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "enabled_environment_variable": "G1D_ENABLE_BOUNDED_ENDPOINT_FEEDBACK",
+  "enabled_value": "1",
+  "default_enabled": false,
+  "left_arm": {
+    "nominal_error_tolerance_rad": 0.015,
+    "entry_resume_max_abs_dq_rad_sec": 0.03,
+    "entry_resume_stable_sec": 0.15,
+    "pause_above_abs_dq_rad_sec": 0.05,
+    "hard_abort_above_abs_dq_rad_sec": 0.1,
+    "command_offset_rate_rad_sec": 0.025,
+    "verify_stable_sec": 0.25,
+    "timeout_sec": 8.0,
+    "maximum_cumulative_offset_rad": 0.1,
+    "hard_limit_inset_rad": 0.02,
+    "maximum_error_worsening_rad": 0.015
+  },
+  "expected_source_sha256": "23f7a936cb7ce234da8453fb6d84b72be54253e1e1852c3218a92ec844f31bee"
+}

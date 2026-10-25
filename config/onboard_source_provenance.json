@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "export_timestamp": "2026-09-07T11:33:53+08:00",
+  "source_host": "unitree@192.168.123.164",
+  "archive": {
+    "path": "imports/onboard/onboard_script_export_20260907-113353.tar.gz",
+    "sha256": "a05f47a4be44db1966cb9dd91eace4832e1f3276fc315a3d3f4232d7408df978"
+  },
+  "promoted_sources": {
+    "onboard/startup/start_g1_control.sh": "bf2ba3d625385216e003392a55650e72380fd9b64c9a10819293960be4dff9a7",
+    "onboard/startup/start_g1_state.sh": "988439ab992fc7dfdd9d10b589dce70eb64ada99db0cb803204ba2c9f0b63061",
+    "onboard/startup/g1_trajectory_bridge_env.sh": "b012634e6377769b30a7cf63564040c8c530a66c15bf2fb61b3d24ed0c723c9f",
+    "onboard/state/unitree_reader.py": "dda0f7c7d420130b4d5183495ed71a4f06813d6e2039cf0e6c44e454624b8e08",
+    "onboard/state/g1_d_state_bridge/g1_d_state_bridge/state_bridge_node.py": "ea683b300a36bb907c5f70a32f9ca7110848cd9cbaf558544045ea56fb2171ef",
+    "onboard/height/g1d_height_15cm.cpp": "dfcdc75b98bd59f9447416a35405327ffc1de415a730ca76c3c2cb239abbb0d0",
+    "hand/onboard/rh56h1_virtual_gripper_controller_v4.py": "b32270a18c593d6dbd7d76e5bb685ed6471de5da3aa4fe0237359e54b7227ef1",
+    "hand/onboard/rh56h1_virtual_gripper_mapper_v5.py": "df6bebc3931aa8002de46d97728444ef1ba5e4909063b3b789c2e0e25a040dd6",
+    "hand/onboard/rh56h1_udp_driver/rh56h1_udp_driver/driver_node.py": "99da2bde1e67d73406d23fa67be875ca61d035c22cd21fb425c4b6380992f1f7"
+  }
+}

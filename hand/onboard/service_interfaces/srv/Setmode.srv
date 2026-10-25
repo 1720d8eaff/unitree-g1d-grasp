@@ -1,0 +1,16 @@
+#接收的命令类型
+string status
+#灵巧手ID
+int32 hand_id
+#控制模式(0-速度力保护，1-力闭环，2-阻抗)
+#注意：暂未开放模式：1-力闭环，2-阻抗
+int32 mode0
+int32 mode1
+int32 mode2
+int32 mode3
+int32 mode4
+int32 mode5
+---
+# 是否发出成功
+bool mode_accepted
+

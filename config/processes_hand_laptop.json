@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "role": "hand_laptop",
+  "allows_arm": false,
+  "allows_real_execution": false,
+  "processes": [
+    {
+      "name": "rh56h1_gateway",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 30.0,
+      "ready_patterns": ["UDP 网关已启动"],
+      "command": "set -eo pipefail; exec python3 -u @PROJECT_ROOT@/hand/laptop/rh56h1_gateway_v2.py"
+    }
+  ]
+}

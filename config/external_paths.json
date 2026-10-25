@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "laptop": {
+    "g1_workspace": "/home/yii/g1_ws",
+    "cyclonedds_xml": "/home/yii/cyclonedds_ws/cyclonedds.xml",
+    "anygrasp_sdk_root": "/home/yii/anygrasp_sdk/grasp_detection",
+    "anygrasp_checkpoint": "/home/yii/下载/checkpoint_detection.tar"
+  },
+  "onboard": {
+    "host": "unitree@192.168.123.164",
+    "ros_workspace": "/home/unitree/ros2_ws",
+    "cyclonedds_xml": "/home/unitree/cyclonedds_ws/cyclonedds.xml"
+  }
+}

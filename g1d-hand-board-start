@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$PROJECT_DIR/tools/process_supervisor.py" \
+  --config "$PROJECT_DIR/config/processes_hand_board.json" "$@"

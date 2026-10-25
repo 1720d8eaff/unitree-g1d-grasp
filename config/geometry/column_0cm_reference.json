@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile_id": "column_0cm_reference",
+  "description": "2026-09-04交接手册中的旧桌面几何，仅供追溯",
+  "column_raise_m": 0.0,
+  "verified": true,
+  "work_table": {
+    "id": "work_table",
+    "frame_id": "torso_link",
+    "size_xyz_m": [0.4, 1.0, 0.12],
+    "center_xyz_m": [0.48, 0.0, -0.18],
+    "top_z_m": -0.12
+  },
+  "warning": "立柱升高15 cm后不得激活此配置"
+}

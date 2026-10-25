@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profile_id": "column_15cm_unverified",
+  "description": "立柱升高15 cm后的占位配置，必须重新测量桌面相对torso_link的几何",
+  "column_raise_m": 0.15,
+  "verified": false,
+  "work_table": {
+    "id": "work_table",
+    "frame_id": "torso_link",
+    "size_xyz_m": [0.4, 1.0, 0.12],
+    "center_xyz_m": [0.48, 0.0, null],
+    "top_z_m": null
+  },
+  "required_action": "现场测量并填写center_xyz_m[2]与top_z_m，再由维护者将verified改为true"
+}

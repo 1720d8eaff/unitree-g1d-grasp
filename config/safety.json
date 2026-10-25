@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "real_execution_exposed_by_g1dctl": false,
+  "automatic_arm_disarm_allowed": false,
+  "default_mode": "plan_only",
+  "joint_limit_margin_rad": 0.1,
+  "grasp_endpoint_tolerance_rad": 0.015,
+  "pre_execute_start_tolerance_rad": 0.008,
+  "maximum_trajectory_duration_sec": 60.0,
+  "maximum_relay_speed_rad_sec": 0.35,
+  "maximum_grasp_segment_detour_rad": 0.3,
+  "forbidden_until_endpoint_v2_accepted": [
+    "with_hand",
+    "visual_adjust",
+    "close",
+    "lift",
+    "place"
+  ]
+}

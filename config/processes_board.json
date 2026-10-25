@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "role": "board",
+  "allows_arm": false,
+  "allows_real_execution": false,
+  "processes": [
+    {
+      "name": "control",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 45.0,
+      "ready_patterns": ["DISARMED", "ENABLED"],
+      "command": "set -eo pipefail; if command -v conda >/dev/null 2>&1; then source \"$(conda info --base)/etc/profile.d/conda.sh\"; conda deactivate 2>/dev/null || true; conda deactivate 2>/dev/null || true; fi; source /opt/ros/foxy/setup.bash; source /home/unitree/ros2_ws/install/setup.bash; source /home/unitree/g1_trajectory_bridge_env.sh; source /home/unitree/cyclonedds_ws/install/setup.bash; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; export CYCLONEDDS_URI=/home/unitree/cyclonedds_ws/cyclonedds.xml; export ROS_DOMAIN_ID=0; export ROS_LOCALHOST_ONLY=0; export G1D_ENABLE_BOUNDED_ENDPOINT_FEEDBACK=1; exec start_g1_control"
+    },
+    {
+      "name": "vision",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 90.0,
+      "ready_patterns": ["Pipeline V4 ready."],
+      "command": "set -eo pipefail; source \"$(conda info --base)/etc/profile.d/conda.sh\"; conda activate tv_jetson; exec python3 @PROJECT_ROOT@/onboard/vision/detect_and_locate_d435_pipeline_v4_noalign.py"
+    }
+  ]
+}

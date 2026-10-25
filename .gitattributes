@@ -1,0 +1,5 @@
+# Byte-preserving checkout: source provenance and CDR metadata pin exact SHA-256 values.
+* -text
+*.cdr binary
+*.tar.gz binary
+*.docx binary

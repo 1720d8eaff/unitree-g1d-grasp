@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "artifact_type": "g1_left_grasp_manual_teach_calibration",
+  "source_run": "runs/teach-20260909-152516",
+  "source_raw_sha256": "bcd3f1ede005e0caf1355a11e9b459645d96593ee59ad8c1dc72a78a7b038d85",
+  "frame_id": "torso_link",
+  "tcp_link": "left_grasp_tcp",
+  "endpoint_window_sec": 1.0,
+  "endpoint_positions_rad": [
+    -0.13584119081497192,
+    0.8738297820091248,
+    -0.8470929861068726,
+    -0.4837552309036255,
+    0.44414737820625305,
+    1.1472378969192505,
+    0.01870737597346306
+  ],
+  "endpoint_tcp_position_m_diagnostic": [
+    0.3021408971772454,
+    0.1793890435724622,
+    -0.05824937879163937
+  ],
+  "source_anygrasp_position_m": [
+    0.2797283172659334,
+    0.1883208243445774,
+    -0.020495087360509034
+  ],
+  "source_anygrasp_quaternion_xyzw": [
+    -0.008683530496708957,
+    0.44365148417228667,
+    -0.001935523253123028,
+    0.8961552380249622
+  ],
+  "world_tcp_position_offset_m": [
+    0.02241257991131203,
+    -0.008931780772115202,
+    -0.037754291431130334
+  ],
+  "endpoint_tcp_quaternion_xyzw": [
+    0.6407253840207201,
+    0.24008738048644277,
+    -0.08008332529207951,
+    0.7248556360123243
+  ],
+  "endpoint_approach_axis_xyz": [
+    0.8718894214885364,
+    0.19156245873545158,
+    -0.450680220444179
+  ],
+  "left_wrist_yaw_endpoint_rad": 0.01870737597346306,
+  "left_wrist_yaw_endpoint_deg": 1.0718536890438732,
+  "left_wrist_yaw_endpoint_window_range_rad": 0.00007190555334091187,
+  "policy": {
+    "use_live_anygrasp_position_for_second_segment": true,
+    "use_manual_tcp_orientation_for_second_segment": true,
+    "use_relative_tcp_calibration": false,
+    "use_absolute_torso_tcp_pose": false,
+    "use_endpoint_joint_state_as_ik_seed": true,
+    "position_is_locked": false,
+    "original_taught_trajectory_is_unchanged": true
+  }
+}

@@ -1,0 +1,1690 @@
+#!/usr/bin/env python3
+
+"""Pure Unitree DDS backend for the split G1-D trajectory bridge.
+
+This process deliberately does not import rclpy or any ROS message package.
+It owns Unitree LowState/LowCmd, MotionSwitcher, validation, interpolation and
+all safety state. A separate ROS-only process talks to it over a local Unix
+socket.
+"""
+
+import fcntl
+import math
+import os
+import signal
+import socket
+import threading
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
+    MotionSwitcherClient,
+)
+from unitree_sdk2py.core.channel import (
+    ChannelFactoryInitialize,
+    ChannelPublisher,
+    ChannelSubscriber,
+)
+from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+from unitree_sdk2py.utils.crc import CRC
+
+from .ipc_protocol import DEFAULT_SOCKET_PATH, PROTOCOL_VERSION, FramedSocket
+
+
+CONTROL_DT = 0.002
+STATE_WAIT_TIMEOUT = 5.0
+STATE_STALE_TIMEOUT = 0.10
+EXPECTED_MOTOR_SLOTS = 35
+EXPECTED_MODE_MACHINE = 5
+EXPECTED_MODE_PR = 0
+
+CONTROL_INDICES = [12, 13] + list(range(15, 29))
+WAIST_YAW_INDEX = 12
+WAIST_SECOND_INDEX = 13
+
+MAX_INITIAL_ABS_DQ = 0.20
+MAX_RUNNING_ABS_DQ = 1.00
+# Normal feedback/command latency is expected while a trajectory is moving.
+# Crossing this soft threshold is reported but no longer aborts execution.
+SOFT_TRACKING_ERROR = 0.15
+# Keep only a wide running guard for a stalled joint or gross desynchronization.
+MAX_RUNNING_HARD_POSITION_ERROR = 0.60
+MAX_TRAJECTORY_INCREMENT = 0.12
+MAX_SEGMENT_SPEED = 0.35
+MAX_START_TARGET_ERROR = 0.10
+# Legacy acceptance threshold retained for unmodified right/dual-arm paths.
+MAX_FINAL_TARGET_ERROR = 0.10
+# Legacy right/dual-arm final hold timeout.  The bounded left-arm endpoint
+# controller has its own longer timeout below; the relay permits sufficient
+# result time beyond the nominal trajectory duration.
+FINAL_SETTLE_TIMEOUT = 4.0
+FINAL_STABLE_TIME = 0.25
+# Keep this aligned with the laptop-side taught-trajectory builder.  The first
+# real-execution slowdown can produce a trajectory longer than 30 s while
+# remaining inside the unchanged per-segment speed and increment guards.
+MAX_TRAJECTORY_DURATION = 60.0
+
+# Bounded endpoint feedback: left arm only.  It runs only after the nominal
+# trajectory has ended.  Low-speed hysteresis alternates between gradual
+# setpoint ramping and settling; success is always judged against the original
+# MoveIt endpoint rather than the compensated command.
+LEFT_ARM_FINAL_FEEDBACK_ENABLED = (
+    os.environ.get("G1D_ENABLE_BOUNDED_ENDPOINT_FEEDBACK", "0") == "1"
+)
+LEFT_ARM_FINAL_FEEDBACK_TOLERANCE = 0.015
+LEFT_ARM_FINAL_FEEDBACK_TIMEOUT = 8.0
+LEFT_ARM_FINAL_FEEDBACK_ENTRY_MAX_ABS_DQ = 0.03
+LEFT_ARM_FINAL_FEEDBACK_LOW_SPEED_STABLE_TIME = 0.15
+LEFT_ARM_FINAL_FEEDBACK_PAUSE_ABS_DQ = 0.05
+LEFT_ARM_FINAL_FEEDBACK_HARD_ABS_DQ = 0.10
+LEFT_ARM_FINAL_FEEDBACK_INTEGRAL_GAIN_PER_SEC = 1.50
+LEFT_ARM_FINAL_FEEDBACK_MAX_COMMAND_RATE = 0.025
+LEFT_ARM_FINAL_FEEDBACK_MAX_OFFSET = 0.10
+LEFT_ARM_FINAL_FEEDBACK_POSITION_LIMIT_MARGIN = 0.02
+LEFT_ARM_FINAL_FEEDBACK_MAX_ERROR_WORSENING = 0.015
+
+CHECK_MODE_TIMEOUT = 1.0
+RELEASE_MODE_TIMEOUT = 3.0
+RELEASE_VERIFY_TIMEOUT = 30.0
+SELECT_MODE_TIMEOUT = 2.0
+SELECT_RETRY_INTERVAL = 10.0
+RESTORE_TOTAL_TIMEOUT = 60.0
+RPC_TIMEOUT_CODE = 3104
+
+LOWCMD_PREFLIGHT_MAX_AGE = 2.0
+SOCKET_ACCEPT_TIMEOUT = 1.0
+
+LEFT_ARM_JOINTS = [
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+]
+RIGHT_ARM_JOINTS = [
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+]
+DUAL_ARM_JOINTS = LEFT_ARM_JOINTS + RIGHT_ARM_JOINTS
+
+EXPECTED_GROUPS: Dict[str, Sequence[str]] = {
+    "left_arm": LEFT_ARM_JOINTS,
+    "right_arm": RIGHT_ARM_JOINTS,
+    "dual_arm": DUAL_ARM_JOINTS,
+}
+
+JOINT_TO_INDEX = {
+    "left_shoulder_pitch_joint": 15,
+    "left_shoulder_roll_joint": 16,
+    "left_shoulder_yaw_joint": 17,
+    "left_elbow_joint": 18,
+    "left_wrist_roll_joint": 19,
+    "left_wrist_pitch_joint": 20,
+    "left_wrist_yaw_joint": 21,
+    "right_shoulder_pitch_joint": 22,
+    "right_shoulder_roll_joint": 23,
+    "right_shoulder_yaw_joint": 24,
+    "right_elbow_joint": 25,
+    "right_wrist_roll_joint": 26,
+    "right_wrist_pitch_joint": 27,
+    "right_wrist_yaw_joint": 28,
+}
+INDEX_TO_JOINT = {index: name for name, index in JOINT_TO_INDEX.items()}
+
+# URDF position limits for the left arm, indexed by Unitree motor slot.  The
+# feedback command is additionally kept this far inside each hard limit.
+LEFT_ARM_POSITION_LIMITS = {
+    15: (-3.0892, 2.6704),
+    16: (-1.5882, 2.2515),
+    17: (-2.6180, 2.6180),
+    18: (-1.0472, 2.0944),
+    19: (-1.972222054, 1.972222054),
+    20: (-1.614429558, 1.614429558),
+    21: (-1.614429558, 1.614429558),
+}
+
+KP: Dict[int, float] = {
+    WAIST_YAW_INDEX: 60.0,
+    WAIST_SECOND_INDEX: 40.0,
+}
+KD: Dict[int, float] = {
+    WAIST_YAW_INDEX: 1.0,
+    WAIST_SECOND_INDEX: 1.0,
+}
+for _index in range(15, 29):
+    KP[_index] = 40.0
+    KD[_index] = 1.0
+
+# LeftShoulderPitch (motor index 15):
+# Unitree official G1 arm7 gains.
+KP[15] = 60.0
+KD[15] = 1.5
+
+
+class LowStateCache:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._received = threading.Event()
+        self._q: List[float] = []
+        self._dq: List[float] = []
+        self._mode_machine = -1
+        self._mode_pr = -1
+        self._receive_time = 0.0
+
+    def callback(self, msg: LowState_) -> None:
+        try:
+            q = [float(motor.q) for motor in msg.motor_state]
+            dq = [float(motor.dq) for motor in msg.motor_state]
+            with self._lock:
+                self._q = q
+                self._dq = dq
+                self._mode_machine = int(msg.mode_machine)
+                self._mode_pr = int(msg.mode_pr)
+                self._receive_time = time.monotonic()
+            self._received.set()
+        except Exception as exc:
+            print(f"[LowState 回调异常] {exc}", flush=True)
+
+    def wait(self, timeout: float) -> bool:
+        return self._received.wait(timeout)
+
+    def snapshot(self) -> Tuple[List[float], List[float], int, int, float]:
+        with self._lock:
+            age = time.monotonic() - self._receive_time
+            return (
+                list(self._q),
+                list(self._dq),
+                self._mode_machine,
+                self._mode_pr,
+                age,
+            )
+
+
+def check_finite(values: Sequence[float], name: str) -> None:
+    for index, value in enumerate(values):
+        if not math.isfinite(value):
+            raise RuntimeError(f"{name}[{index}] 不是有限数值：{value!r}")
+
+
+def validate_state(
+    snapshot: Tuple[List[float], List[float], int, int, float],
+    *,
+    require_stationary: bool,
+) -> None:
+    q, dq, mode_machine, mode_pr, age = snapshot
+    if len(q) != EXPECTED_MOTOR_SLOTS or len(dq) != EXPECTED_MOTOR_SLOTS:
+        raise RuntimeError(
+            f"LowState 槽位数量异常：q={len(q)}, dq={len(dq)}，"
+            f"预期 {EXPECTED_MOTOR_SLOTS}"
+        )
+    if age > STATE_STALE_TIMEOUT:
+        raise RuntimeError(f"LowState 已超时 {age:.3f} 秒")
+    if mode_machine != EXPECTED_MODE_MACHINE:
+        raise RuntimeError(
+            f"mode_machine 不是 {EXPECTED_MODE_MACHINE}，实际 {mode_machine}"
+        )
+    if mode_pr != EXPECTED_MODE_PR:
+        raise RuntimeError(f"mode_pr 不是 {EXPECTED_MODE_PR}，实际 {mode_pr}")
+    check_finite(q, "q")
+    check_finite(dq, "dq")
+    if require_stationary:
+        moving = [
+            (index, dq[index])
+            for index in CONTROL_INDICES
+            if abs(dq[index]) > MAX_INITIAL_ABS_DQ
+        ]
+        if moving:
+            detail = ", ".join(f"{i}:{v:+.3f}" for i, v in moving)
+            raise RuntimeError("机器人当前并非静止状态：" + detail)
+
+
+def build_hold_command(target_q: Sequence[float], mode_machine: int):
+    cmd = unitree_hg_msg_dds__LowCmd_()
+    cmd.mode_pr = EXPECTED_MODE_PR
+    cmd.mode_machine = mode_machine
+
+    for index in range(len(cmd.motor_cmd)):
+        motor = cmd.motor_cmd[index]
+        motor.mode = 0
+        motor.tau = 0.0
+        motor.q = 0.0
+        motor.dq = 0.0
+        motor.kp = 0.0
+        motor.kd = 0.0
+
+    for index in CONTROL_INDICES:
+        motor = cmd.motor_cmd[index]
+        motor.mode = 1
+        motor.tau = 0.0
+        motor.q = float(target_q[index])
+        motor.dq = 0.0
+        motor.kp = float(KP[index])
+        motor.kd = float(KD[index])
+    return cmd
+
+
+def write_command(publisher: ChannelPublisher, crc: CRC, cmd) -> None:
+    cmd.crc = crc.Crc(cmd)
+    publisher.Write(cmd)
+
+
+class ContinuousCommandWriter:
+    """Continuously publish one locked LowCmd object at 500 Hz."""
+
+    def __init__(self, publisher: ChannelPublisher, crc: CRC, cmd) -> None:
+        self._publisher = publisher
+        self._crc = crc
+        self._cmd = cmd
+        self._cmd_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._started = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._error_lock = threading.Lock()
+        self._error: Optional[BaseException] = None
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("LowCmd 发布线程已经启动")
+        self._thread = threading.Thread(
+            target=self._run, name="lowcmd_continuous_writer", daemon=True
+        )
+        self._thread.start()
+        if not self._started.wait(1.0):
+            raise RuntimeError("LowCmd 发布线程启动超时")
+
+    def _run(self) -> None:
+        next_tick = time.perf_counter()
+        self._started.set()
+        while not self._stop.is_set():
+            try:
+                with self._cmd_lock:
+                    write_command(self._publisher, self._crc, self._cmd)
+            except BaseException as exc:
+                with self._error_lock:
+                    self._error = exc
+                return
+
+            next_tick += CONTROL_DT
+            sleep_time = next_tick - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            elif sleep_time < -0.020:
+                next_tick = time.perf_counter()
+
+    def update_targets(self, targets: Dict[int, float]) -> None:
+        with self._cmd_lock:
+            for index, value in targets.items():
+                self._cmd.motor_cmd[index].q = float(value)
+
+    def get_targets(self) -> Dict[int, float]:
+        with self._cmd_lock:
+            return {
+                index: float(self._cmd.motor_cmd[index].q)
+                for index in CONTROL_INDICES
+            }
+
+    def raise_if_failed(self) -> None:
+        with self._error_lock:
+            error = self._error
+        if error is not None:
+            raise RuntimeError(f"LowCmd 发布线程异常：{error}") from error
+        if self._thread is not None and not self._thread.is_alive():
+            if not self._stop.is_set():
+                raise RuntimeError("LowCmd 发布线程意外停止")
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                print("[警告] LowCmd 发布线程未在 2 秒内退出", flush=True)
+
+
+class UnitreeTrajectoryBackend:
+    def __init__(
+        self,
+        interface: str = "eth0",
+        socket_path: str = DEFAULT_SOCKET_PATH,
+    ) -> None:
+        self._interface = interface
+        self._socket_path = socket_path
+
+        self._state_lock = threading.RLock()
+        self._mode_operation_lock = threading.Lock()
+        self._execution_lock = threading.Lock()
+        self._connection_lock = threading.Lock()
+        self._state = "DISARMED"
+
+        self._cache = LowStateCache()
+        self._crc = CRC()
+        self._msc: Optional[MotionSwitcherClient] = None
+        self._lowcmd_publisher: Optional[ChannelPublisher] = None
+        self._writer: Optional[ContinuousCommandWriter] = None
+        self._high_level_released = False
+
+        self._execution_thread: Optional[threading.Thread] = None
+        self._active_goal_id: Optional[str] = None
+        self._cancel_event = threading.Event()
+        self._shutdown_requested = threading.Event()
+
+        self._server_socket: Optional[socket.socket] = None
+        self._client: Optional[FramedSocket] = None
+        self._lock_file = None
+
+        ChannelFactoryInitialize(0, interface)
+        self._lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        self._lowstate_subscriber.Init(self._cache.callback, 10)
+
+        self._msc = MotionSwitcherClient()
+        self._msc.SetTimeout(CHECK_MODE_TIMEOUT)
+        self._msc.Init()
+
+        self._acquire_single_instance_lock()
+        self._create_server_socket()
+        self._log("info", f"纯 Unitree DDS 后端已启动，网卡={interface}")
+        self._log(
+            "warning" if LEFT_ARM_FINAL_FEEDBACK_ENABLED else "info",
+            "左臂有限终点反馈="
+            + ("ENABLED" if LEFT_ARM_FINAL_FEEDBACK_ENABLED else "DISABLED")
+            + "；环境变量 G1D_ENABLE_BOUNDED_ENDPOINT_FEEDBACK="
+            + ("1" if LEFT_ARM_FINAL_FEEDBACK_ENABLED else "0"),
+        )
+        if LEFT_ARM_FINAL_FEEDBACK_ENABLED:
+            self._log(
+                "warning",
+                "左臂终点反馈参数："
+                f"tolerance={LEFT_ARM_FINAL_FEEDBACK_TOLERANCE:.3f}rad, "
+                f"entry/resume_dq<={LEFT_ARM_FINAL_FEEDBACK_ENTRY_MAX_ABS_DQ:.3f}rad/s, "
+                f"pause_dq>{LEFT_ARM_FINAL_FEEDBACK_PAUSE_ABS_DQ:.3f}rad/s, "
+                f"hard_dq>{LEFT_ARM_FINAL_FEEDBACK_HARD_ABS_DQ:.3f}rad/s, "
+                f"command_rate<={LEFT_ARM_FINAL_FEEDBACK_MAX_COMMAND_RATE:.3f}rad/s, "
+                f"timeout={LEFT_ARM_FINAL_FEEDBACK_TIMEOUT:.1f}s",
+            )
+        self._log(
+            "warning",
+            "当前为 DISARMED：未创建 rt/lowcmd 发布器，未调用 ReleaseMode",
+        )
+
+    def serve_forever(self) -> None:
+        assert self._server_socket is not None
+        while not self._shutdown_requested.is_set():
+            try:
+                sock, _ = self._server_socket.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                if self._shutdown_requested.is_set():
+                    break
+                raise
+
+            connection = FramedSocket(sock)
+            with self._connection_lock:
+                old = self._client
+                self._client = connection
+            if old is not None:
+                old.close()
+
+            self._log("info", "ROS 前端已连接本机 Unix Socket")
+            self._send_backend_state("前端已连接")
+            try:
+                self._client_loop(connection)
+            except EOFError:
+                self._log("warning", "ROS 前端连接已断开")
+            except Exception as exc:
+                self._log("error", f"IPC 客户端处理异常：{exc}")
+            finally:
+                with self._connection_lock:
+                    if self._client is connection:
+                        self._client = None
+                connection.close()
+                self._on_frontend_disconnect()
+
+    def _client_loop(self, connection: FramedSocket) -> None:
+        while not self._shutdown_requested.is_set():
+            message = connection.recv()
+            if int(message.get("version", -1)) != PROTOCOL_VERSION:
+                self._send_response(
+                    connection,
+                    str(message.get("request_id", "")),
+                    False,
+                    "IPC 协议版本不匹配",
+                )
+                continue
+            if str(message.get("kind", "")) != "request":
+                continue
+
+            request_id = str(message.get("request_id", ""))
+            operation = str(message.get("operation", ""))
+            payload = message.get("payload", {})
+            if not isinstance(payload, dict):
+                payload = {}
+
+            try:
+                success, text, extra = self._handle_request(operation, payload)
+            except Exception as exc:
+                success, text, extra = False, f"后端请求异常：{exc}", {}
+                self._log("error", text)
+            self._send_response(connection, request_id, success, text, extra)
+
+    def _handle_request(
+        self, operation: str, payload: Dict[str, Any]
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        if operation == "hello":
+            return True, "Unitree 后端已连接", self._state_payload()
+        if operation == "get_state":
+            return True, "状态读取成功", self._state_payload()
+        if operation == "set_control":
+            enabled = payload.get("enabled")
+            if not isinstance(enabled, bool):
+                return False, "set_control.enabled 必须为布尔值", {}
+            if not self._mode_operation_lock.acquire(blocking=False):
+                return False, "已有启用/停用操作正在进行", {}
+            try:
+                if enabled:
+                    with self._state_lock:
+                        already_armed = self._state == "ARMED"
+                    if not already_armed:
+                        self._validate_frontend_lowcmd_preflight(payload)
+                    success, message = self._enable_control()
+                else:
+                    success, message = self._disable_control()
+                self._send_backend_state(message)
+                return success, message, self._state_payload()
+            finally:
+                self._mode_operation_lock.release()
+        if operation == "submit_trajectory":
+            return self._submit_trajectory(payload)
+        if operation == "cancel_trajectory":
+            goal_id = str(payload.get("goal_id", "")).strip()
+            return self._cancel_trajectory(goal_id)
+        return False, f"未知操作：{operation}", {}
+
+    def _enable_control(self) -> Tuple[bool, str]:
+        with self._state_lock:
+            if self._state == "ARMED":
+                return True, "轨迹控制已经启用"
+            if self._state != "DISARMED":
+                return False, f"当前状态 {self._state}，不能启用"
+            if self._execution_thread is not None and self._execution_thread.is_alive():
+                return False, "仍有轨迹执行线程"
+            self._state = "ENABLING"
+        self._send_backend_state("开始启用控制")
+
+        writer_started = False
+        release_attempted = False
+        try:
+            if not self._cache.wait(STATE_WAIT_TIMEOUT):
+                raise RuntimeError(
+                    f"{STATE_WAIT_TIMEOUT:.1f} 秒内未收到 rt/lowstate"
+                )
+            validate_state(self._cache.snapshot(), require_stationary=True)
+            self._wait_for_ai_ready(timeout=20.0)
+
+            fresh_snapshot = self._cache.snapshot()
+            validate_state(fresh_snapshot, require_stationary=True)
+            target_q, _, mode_machine, _, _ = fresh_snapshot
+
+            cmd = build_hold_command(target_q, mode_machine)
+            if self._lowcmd_publisher is None:
+                self._lowcmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
+                self._lowcmd_publisher.Init()
+
+            self._writer = ContinuousCommandWriter(
+                self._lowcmd_publisher, self._crc, cmd
+            )
+            self._writer.start()
+            writer_started = True
+            time.sleep(0.20)
+            self._writer.raise_if_failed()
+
+            self._log("warning", "500 Hz 原位保持流已启动，准备释放 ai 模式")
+            release_attempted = True
+            self._release_ai_mode()
+            self._high_level_released = True
+
+            with self._state_lock:
+                self._state = "ARMED"
+            message = "轨迹控制已启用；已确认高层模式 name == ''"
+            self._log("warning", message)
+            return True, message
+
+        except Exception as exc:
+            self._log("error", f"启用失败：{exc}")
+            recovered = False
+            if writer_started and release_attempted:
+                recovered = self._restore_ai_mode(RESTORE_TOTAL_TIMEOUT)
+            elif writer_started:
+                recovered = self._check_ai_once()
+
+            if recovered:
+                if self._writer is not None:
+                    self._writer.stop()
+                self._writer = None
+                publisher_released = self._release_lowcmd_publisher()
+                self._high_level_released = False
+                with self._state_lock:
+                    self._state = "DISARMED"
+                if publisher_released:
+                    return False, (
+                        f"启用失败，已确认恢复 ai 且释放 "
+                        f"LowCmd Publisher：{exc}"
+                    )
+                return False, (
+                    f"启用失败，已确认恢复 ai，但 "
+                    f"LowCmd Publisher 释放失败：{exc}"
+                )
+
+            with self._state_lock:
+                self._state = "RECOVERY_REQUIRED" if writer_started else "DISARMED"
+            if writer_started:
+                return False, (
+                    f"启用失败且尚未确认 ai；LowCmd 继续保持，请勿关闭后端：{exc}"
+                )
+            return False, f"启用失败，未创建 LowCmd：{exc}"
+
+    def _release_lowcmd_publisher(self) -> bool:
+        """
+        仅在 LowCmd writer 已经停止、且已经确认 ai 恢复后调用。
+        显式关闭 Unitree DDS DataWriter，使 /lowcmd Publisher 端点消失。
+        """
+        publisher = self._lowcmd_publisher
+        if publisher is None:
+            return True
+
+        try:
+            publisher.Close()
+        except Exception as exc:
+            self._log(
+                "error",
+                f"关闭 rt/lowcmd DDS Publisher 失败：{exc}",
+            )
+            return False
+
+        self._lowcmd_publisher = None
+        self._log(
+            "info",
+            "rt/lowcmd DDS Publisher 已关闭并释放",
+        )
+        return True
+
+    def _disable_control(self) -> Tuple[bool, str]:
+        with self._state_lock:
+            state = self._state
+            if state == "DISARMED":
+                if self._writer is not None:
+                    return False, (
+                        "状态为 DISARMED 但 LowCmd writer 仍存在，"
+                        "请勿继续启用"
+                    )
+                released = self._release_lowcmd_publisher()
+                if released:
+                    return True, (
+                        "轨迹控制已经停用；"
+                        "rt/lowcmd DDS Publisher 已释放"
+                    )
+                return False, (
+                    "轨迹控制已停用，但 "
+                    "rt/lowcmd DDS Publisher 释放失败"
+                )
+            if state not in {"ARMED", "RECOVERY_REQUIRED"}:
+                return False, f"当前状态 {state}，不能停用"
+            self._state = "DISABLING"
+        self._send_backend_state("开始停用控制")
+
+        self._cancel_event.set()
+        thread = self._execution_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                with self._state_lock:
+                    self._state = state
+                return False, "轨迹线程未及时停止；仍保持 LowCmd"
+
+        if self._writer is None:
+            self._high_level_released = False
+            released = self._release_lowcmd_publisher()
+            with self._state_lock:
+                self._state = "DISARMED"
+            if released:
+                return True, (
+                    "没有活动 LowCmd writer；"
+                    "已设为 DISARMED 并释放 DDS Publisher"
+                )
+            return False, (
+                "没有活动 LowCmd writer，但 "
+                "DDS Publisher 释放失败"
+            )
+
+        recovered = self._restore_ai_mode(RESTORE_TOTAL_TIMEOUT)
+        if not recovered:
+            with self._state_lock:
+                self._state = "RECOVERY_REQUIRED"
+            message = (
+                "60 秒内未确认 ai；LowCmd 继续保持。请保持后端运行并再次停用"
+            )
+            self._log("error", message)
+            return False, message
+
+        self._writer.stop()
+        self._writer = None
+        publisher_released = self._release_lowcmd_publisher()
+        self._high_level_released = False
+        self._cancel_event.clear()
+        with self._state_lock:
+            self._state = "DISARMED"
+
+        if not publisher_released:
+            message = (
+                "已确认 ai 模式，LowCmd 发布线程已停止，"
+                "但 rt/lowcmd DDS Publisher 释放失败"
+            )
+            self._log("error", message)
+            return False, message
+
+        message = (
+            "已确认 ai 模式，LowCmd 发布线程已停止，"
+            "rt/lowcmd DDS Publisher 已释放"
+        )
+        self._log("info", message)
+        return True, message
+
+    def _submit_trajectory(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        goal_id = str(payload.get("goal_id", "")).strip()
+        if not goal_id:
+            return False, "goal_id 为空", {}
+
+        with self._state_lock:
+            if self._state != "ARMED" or self._writer is None:
+                self._publish_status(goal_id, "rejected", "真实执行器当前未 ARMED")
+                return False, "真实执行器当前未 ARMED", {}
+
+        error, group_name, normalized = self._validate_trajectory(payload)
+        if error is not None:
+            self._publish_status(goal_id, "rejected", error)
+            return False, error, {}
+        assert normalized is not None
+
+        with self._execution_lock:
+            if self._execution_thread is not None and self._execution_thread.is_alive():
+                text = "已有轨迹正在执行"
+                self._publish_status(goal_id, "rejected", text)
+                return False, text, {}
+            self._active_goal_id = goal_id
+            self._cancel_event.clear()
+            self._execution_thread = threading.Thread(
+                target=self._execute_trajectory,
+                args=(goal_id, group_name, normalized),
+                name=f"trajectory_{goal_id[:8]}",
+                daemon=True,
+            )
+            self._publish_status(goal_id, "accepted", f"{group_name} 轨迹校验通过")
+            self._execution_thread.start()
+        return True, "轨迹已接受", {"goal_id": goal_id, "group": group_name}
+
+    def _cancel_trajectory(
+        self, goal_id: str
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        if not goal_id:
+            return False, "goal_id 为空", {}
+        with self._execution_lock:
+            if goal_id != self._active_goal_id:
+                return False, "目标不是当前活动轨迹", {}
+            self._cancel_event.set()
+        self._log("warning", f"收到轨迹取消请求：{goal_id}")
+        return True, "取消请求已接受", {"goal_id": goal_id}
+
+    def _execute_trajectory(
+        self, goal_id: str, group_name: str, trajectory: Dict[str, Any]
+    ) -> None:
+        final_state = "aborted"
+        final_message = "轨迹异常结束"
+        try:
+            writer = self._writer
+            if writer is None:
+                raise RuntimeError("LowCmd writer 不存在")
+
+            joint_names = trajectory["joint_names"]
+            joint_indices = [JOINT_TO_INDEX[name] for name in joint_names]
+            points = trajectory["points"]
+            point_times = [point["time_from_start"] for point in points]
+            point_positions = [point["positions"] for point in points]
+
+            start_targets = writer.get_targets()
+            start_positions = [start_targets[index] for index in joint_indices]
+            execution_start = time.monotonic()
+            next_status_time = execution_start
+            self._publish_status(goal_id, "executing", f"开始执行 {group_name}")
+
+            while True:
+                if self._shutdown_requested.is_set():
+                    raise RuntimeError("后端正在关闭")
+                if self._cancel_event.is_set():
+                    self._freeze_at_measured_position()
+                    final_state = "canceled"
+                    final_message = "已取消并切换为保持实测当前位置"
+                    return
+
+                writer.raise_if_failed()
+                elapsed = time.monotonic() - execution_start
+                targets = self._interpolate_targets(
+                    elapsed,
+                    point_times,
+                    point_positions,
+                    start_positions,
+                    joint_indices,
+                )
+                writer.update_targets(targets)
+                (
+                    _,
+                    _,
+                    max_tracking_error,
+                    max_tracking_index,
+                    max_tracking_actual,
+                    max_tracking_target,
+                ) = self._check_running_safety(writer)
+
+                now = time.monotonic()
+                if now >= next_status_time:
+                    progress = min(1.0, elapsed / point_times[-1])
+                    tracking_text = ""
+                    if max_tracking_error > SOFT_TRACKING_ERROR:
+                        tracking_text = (
+                            f" | tracking_lag joint={max_tracking_index} "
+                            f"error={max_tracking_error:.4f} "
+                            f"actual={max_tracking_actual:+.4f} "
+                            f"target={max_tracking_target:+.4f}"
+                        )
+                    self._publish_status(
+                        goal_id,
+                        "executing",
+                        f"{group_name} progress={progress:.3f}{tracking_text}",
+                    )
+                    next_status_time = now + 0.50
+
+                if elapsed >= point_times[-1]:
+                    break
+                time.sleep(CONTROL_DT)
+
+            final_targets = {
+                index: point_positions[-1][offset]
+                for offset, index in enumerate(joint_indices)
+            }
+            writer.update_targets(final_targets)
+
+            settle_start = time.monotonic()
+            feedback_enabled = (
+                group_name == "left_arm"
+                and LEFT_ARM_FINAL_FEEDBACK_ENABLED
+            )
+            settle_timeout = (
+                LEFT_ARM_FINAL_FEEDBACK_TIMEOUT
+                if feedback_enabled
+                else FINAL_SETTLE_TIMEOUT
+            )
+            settle_deadline = settle_start + settle_timeout
+            stable_since: Optional[float] = None
+            next_settle_status = settle_start
+            final_tolerance = (
+                LEFT_ARM_FINAL_FEEDBACK_TOLERANCE
+                if feedback_enabled
+                else MAX_FINAL_TARGET_ERROR
+            )
+            feedback_started = False
+            feedback_paused = False
+            feedback_low_speed_since: Optional[float] = None
+            feedback_last_update = settle_start
+            feedback_offsets = {index: 0.0 for index in joint_indices}
+            initial_error_sign: Dict[int, int] = {}
+            best_feedback_error = float("inf")
+            while True:
+                if self._shutdown_requested.is_set():
+                    raise RuntimeError("后端正在关闭")
+                if self._cancel_event.is_set():
+                    self._freeze_at_measured_position()
+                    final_state = "canceled"
+                    final_message = "结束等待期间取消，已保持实测当前位置"
+                    return
+                writer.raise_if_failed()
+                q, dq, _, _, _, _ = self._check_running_safety(writer)
+
+                final_error_details = [
+                    (
+                        abs(q[index] - final_targets[index]),
+                        index,
+                        q[index],
+                        final_targets[index],
+                        final_targets[index] - q[index],
+                    )
+                    for index in joint_indices
+                ]
+                (
+                    max_final_error,
+                    max_final_index,
+                    max_final_actual,
+                    max_final_target,
+                    _,
+                ) = max(
+                    final_error_details,
+                    default=(0.0, -1, 0.0, 0.0, 0.0),
+                )
+
+                now = time.monotonic()
+                (
+                    max_final_abs_dq,
+                    max_final_dq_index,
+                    max_final_signed_dq,
+                ) = max(
+                    (
+                        (abs(dq[index]), index, dq[index])
+                        for index in joint_indices
+                    ),
+                    default=(0.0, -1, 0.0),
+                )
+                max_final_dq_name = INDEX_TO_JOINT.get(
+                    max_final_dq_index, str(max_final_dq_index)
+                )
+                if (
+                    feedback_enabled
+                    and max_final_abs_dq
+                    > LEFT_ARM_FINAL_FEEDBACK_HARD_ABS_DQ
+                ):
+                    raise RuntimeError(
+                        "终点反馈硬速度保护触发："
+                        f"joint={max_final_dq_name}, "
+                        f"dq={max_final_signed_dq:+.4f} rad/s, "
+                        f"abs_dq={max_final_abs_dq:.4f} rad/s > "
+                        f"{LEFT_ARM_FINAL_FEEDBACK_HARD_ABS_DQ:.4f}"
+                    )
+                within_final_gate = max_final_error <= final_tolerance
+                if feedback_enabled:
+                    within_final_gate = (
+                        within_final_gate
+                        and max_final_abs_dq
+                        <= LEFT_ARM_FINAL_FEEDBACK_ENTRY_MAX_ABS_DQ
+                    )
+                if within_final_gate:
+                    if stable_since is None:
+                        stable_since = now
+                    if now - stable_since >= FINAL_STABLE_TIME:
+                        break
+                else:
+                    stable_since = None
+
+                if feedback_enabled and max_final_error > final_tolerance:
+                    if not feedback_started:
+                        if (
+                            max_final_abs_dq
+                            <= LEFT_ARM_FINAL_FEEDBACK_ENTRY_MAX_ABS_DQ
+                        ):
+                            if feedback_low_speed_since is None:
+                                feedback_low_speed_since = now
+                            elif (
+                                now - feedback_low_speed_since
+                                >= LEFT_ARM_FINAL_FEEDBACK_LOW_SPEED_STABLE_TIME
+                            ):
+                                feedback_started = True
+                                feedback_low_speed_since = None
+                                feedback_last_update = now
+                                best_feedback_error = max_final_error
+                                for (
+                                    _,
+                                    index,
+                                    _,
+                                    _,
+                                    signed_error,
+                                ) in final_error_details:
+                                    if abs(signed_error) > final_tolerance:
+                                        initial_error_sign[index] = (
+                                            1 if signed_error > 0.0 else -1
+                                        )
+                                self._publish_status(
+                                    goal_id,
+                                    "executing",
+                                    f"{group_name} bounded_endpoint_feedback "
+                                    f"started error={max_final_error:.4f} "
+                                    f"max_dq={max_final_abs_dq:.4f} "
+                                    f"dq_joint={max_final_dq_name}",
+                                )
+                        else:
+                            feedback_low_speed_since = None
+                    else:
+                        if (
+                            max_final_error
+                            > best_feedback_error
+                            + LEFT_ARM_FINAL_FEEDBACK_MAX_ERROR_WORSENING
+                        ):
+                            raise RuntimeError(
+                                "终点反馈误差恶化："
+                                f"current={max_final_error:.4f} rad, "
+                                f"best={best_feedback_error:.4f} rad"
+                            )
+                        best_feedback_error = min(
+                            best_feedback_error, max_final_error
+                        )
+                        if feedback_paused:
+                            if (
+                                max_final_abs_dq
+                                <= LEFT_ARM_FINAL_FEEDBACK_ENTRY_MAX_ABS_DQ
+                            ):
+                                if feedback_low_speed_since is None:
+                                    feedback_low_speed_since = now
+                                elif (
+                                    now - feedback_low_speed_since
+                                    >= LEFT_ARM_FINAL_FEEDBACK_LOW_SPEED_STABLE_TIME
+                                ):
+                                    feedback_paused = False
+                                    feedback_low_speed_since = None
+                                    feedback_last_update = now
+                                    self._publish_status(
+                                        goal_id,
+                                        "executing",
+                                        f"{group_name} bounded_endpoint_feedback "
+                                        f"resumed error={max_final_error:.4f} "
+                                        f"max_dq={max_final_abs_dq:.4f}",
+                                    )
+                            else:
+                                feedback_low_speed_since = None
+                        elif (
+                            max_final_abs_dq
+                            > LEFT_ARM_FINAL_FEEDBACK_PAUSE_ABS_DQ
+                        ):
+                            feedback_paused = True
+                            feedback_low_speed_since = None
+                            feedback_last_update = now
+                            self._publish_status(
+                                goal_id,
+                                "executing",
+                                f"{group_name} bounded_endpoint_feedback "
+                                f"paused_for_settling error={max_final_error:.4f} "
+                                f"dq_joint={max_final_dq_name} "
+                                f"dq={max_final_signed_dq:+.4f}",
+                            )
+
+                        if not feedback_paused:
+                            dt = max(
+                                0.0,
+                                min(0.05, now - feedback_last_update),
+                            )
+                            feedback_last_update = now
+                            compensated_targets: Dict[int, float] = {}
+                            for (
+                                _,
+                                index,
+                                _,
+                                nominal_target,
+                                signed_error,
+                            ) in final_error_details:
+                                joint_name = INDEX_TO_JOINT.get(index, str(index))
+                                if abs(signed_error) <= final_tolerance:
+                                    compensated_targets[index] = (
+                                        nominal_target + feedback_offsets[index]
+                                    )
+                                    continue
+
+                                current_sign = 1 if signed_error > 0.0 else -1
+                                if index not in initial_error_sign:
+                                    initial_error_sign[index] = current_sign
+                                elif current_sign != initial_error_sign[index]:
+                                    raise RuntimeError(
+                                        "终点反馈越过名义目标："
+                                        f"joint={joint_name}, "
+                                        f"error={signed_error:+.4f} rad"
+                                    )
+
+                                requested_delta = (
+                                    LEFT_ARM_FINAL_FEEDBACK_INTEGRAL_GAIN_PER_SEC
+                                    * signed_error
+                                    * dt
+                                )
+                                maximum_delta = (
+                                    LEFT_ARM_FINAL_FEEDBACK_MAX_COMMAND_RATE * dt
+                                )
+                                delta = max(
+                                    -maximum_delta,
+                                    min(maximum_delta, requested_delta),
+                                )
+                                candidate_offset = feedback_offsets[index] + delta
+                                if (
+                                    abs(candidate_offset)
+                                    > LEFT_ARM_FINAL_FEEDBACK_MAX_OFFSET
+                                ):
+                                    raise RuntimeError(
+                                        "终点反馈累计补偿超限："
+                                        f"joint={joint_name}, "
+                                        f"requested={candidate_offset:+.4f} rad"
+                                    )
+                                command_target = nominal_target + candidate_offset
+                                lower, upper = LEFT_ARM_POSITION_LIMITS[index]
+                                safe_lower = (
+                                    lower
+                                    + LEFT_ARM_FINAL_FEEDBACK_POSITION_LIMIT_MARGIN
+                                )
+                                safe_upper = (
+                                    upper
+                                    - LEFT_ARM_FINAL_FEEDBACK_POSITION_LIMIT_MARGIN
+                                )
+                                if not safe_lower <= command_target <= safe_upper:
+                                    raise RuntimeError(
+                                        "终点反馈命令接近硬限位："
+                                        f"joint={joint_name}, "
+                                        f"command={command_target:+.4f}, "
+                                        f"safe=[{safe_lower:+.4f}, {safe_upper:+.4f}]"
+                                    )
+                                feedback_offsets[index] = candidate_offset
+                                compensated_targets[index] = command_target
+                            writer.update_targets(compensated_targets)
+
+                if now >= next_settle_status:
+                    maximum_offset = max(
+                        (abs(value) for value in feedback_offsets.values()),
+                        default=0.0,
+                    )
+                    if feedback_enabled and max_final_error <= final_tolerance:
+                        feedback_mode = "verifying"
+                    elif feedback_started:
+                        feedback_mode = (
+                            "settling" if feedback_paused else "ramping"
+                        )
+                    elif feedback_enabled:
+                        feedback_mode = "waiting_low_speed"
+                    else:
+                        feedback_mode = "legacy_hold"
+                    max_final_name = INDEX_TO_JOINT.get(
+                        max_final_index, str(max_final_index)
+                    )
+                    self._publish_status(
+                        goal_id,
+                        "executing",
+                        f"{group_name} final_settling "
+                        f"nominal_error={max_final_error:.4f} "
+                        f"joint={max_final_name} "
+                        f"actual={max_final_actual:+.4f} "
+                        f"target={max_final_target:+.4f} "
+                        f"feedback={feedback_mode} "
+                        f"max_offset={maximum_offset:.4f} "
+                        f"max_dq={max_final_abs_dq:.4f} "
+                        f"dq_joint={max_final_dq_name}",
+                    )
+                    next_settle_status = now + 0.50
+
+                if now >= settle_deadline:
+                    max_final_name = INDEX_TO_JOINT.get(
+                        max_final_index, str(max_final_index)
+                    )
+                    raise RuntimeError(
+                        "最终目标等待超时："
+                        f"joint={max_final_name}, "
+                        f"error={max_final_error:.4f} rad, "
+                        f"actual={max_final_actual:+.4f}, "
+                        f"target={max_final_target:+.4f}, "
+                        f"max_dq={max_final_abs_dq:.4f}, "
+                        f"dq_joint={max_final_dq_name}, "
+                        f"feedback_started={feedback_started}, "
+                        f"feedback_paused={feedback_paused}, "
+                        f"timeout={settle_timeout:.1f}s, "
+                        f"max_offset="
+                        f"{max(abs(v) for v in feedback_offsets.values()):.4f}"
+                    )
+                time.sleep(0.01)
+
+            final_state = "succeeded"
+            final_message = (
+                "真实轨迹执行完成；相对名义终点的实测误差已稳定进入 "
+                f"{final_tolerance:.3f} rad；"
+                f"bounded_feedback={'used' if feedback_started else 'not_needed'}"
+            )
+
+        except Exception as exc:
+            final_state = "aborted"
+            final_message = str(exc)
+            self._log("error", f"轨迹 {goal_id} 中止：{exc}")
+            try:
+                self._freeze_at_measured_position()
+                final_message += "；已保持实测当前位置"
+            except Exception as freeze_exc:
+                final_message += f"；保持实测位置失败：{freeze_exc}"
+        finally:
+            self._publish_status(goal_id, final_state, final_message)
+            with self._execution_lock:
+                self._active_goal_id = None
+                self._execution_thread = None
+                self._cancel_event.clear()
+
+    def _interpolate_targets(
+        self,
+        elapsed: float,
+        point_times: Sequence[float],
+        point_positions: Sequence[Sequence[float]],
+        start_positions: Sequence[float],
+        joint_indices: Sequence[int],
+    ) -> Dict[int, float]:
+        if elapsed <= point_times[0]:
+            if point_times[0] <= 0.0:
+                values = list(point_positions[0])
+            else:
+                ratio = max(0.0, min(1.0, elapsed / point_times[0]))
+                values = [
+                    start + (end - start) * ratio
+                    for start, end in zip(start_positions, point_positions[0])
+                ]
+        elif elapsed >= point_times[-1]:
+            values = list(point_positions[-1])
+        else:
+            upper = 1
+            while upper < len(point_times) and elapsed > point_times[upper]:
+                upper += 1
+            lower = upper - 1
+            dt = point_times[upper] - point_times[lower]
+            ratio = (elapsed - point_times[lower]) / dt
+            values = [
+                a + (b - a) * ratio
+                for a, b in zip(point_positions[lower], point_positions[upper])
+            ]
+        return {index: values[offset] for offset, index in enumerate(joint_indices)}
+
+    def _check_running_safety(
+        self, writer: ContinuousCommandWriter
+    ) -> Tuple[List[float], List[float], float, int, float, float]:
+        q, dq, mode_machine, mode_pr, age = self._cache.snapshot()
+        if len(q) != EXPECTED_MOTOR_SLOTS or len(dq) != EXPECTED_MOTOR_SLOTS:
+            raise RuntimeError("运行期间 LowState 槽位数量变化")
+        if age > STATE_STALE_TIMEOUT:
+            raise RuntimeError(f"运行期间 LowState 超时：{age:.3f} 秒")
+        if mode_machine != EXPECTED_MODE_MACHINE or mode_pr != EXPECTED_MODE_PR:
+            raise RuntimeError(
+                f"运行期间模式字段变化：mode_machine={mode_machine}, mode_pr={mode_pr}"
+            )
+
+        targets = writer.get_targets()
+        max_error = -1.0
+        max_error_index = -1
+        max_error_actual = 0.0
+        max_error_target = 0.0
+        for index in CONTROL_INDICES:
+            actual_q = q[index]
+            actual_dq = dq[index]
+            if not math.isfinite(actual_q) or not math.isfinite(actual_dq):
+                raise RuntimeError(f"关节 {index} 状态不是有限数")
+            error = abs(actual_q - targets[index])
+            if error > max_error:
+                max_error = error
+                max_error_index = index
+                max_error_actual = actual_q
+                max_error_target = targets[index]
+            if abs(actual_dq) > MAX_RUNNING_ABS_DQ:
+                raise RuntimeError(
+                    f"关节 {index} 运行速度过大：{actual_dq:+.4f} rad/s"
+                )
+
+        if max_error > MAX_RUNNING_HARD_POSITION_ERROR:
+            raise RuntimeError(
+                "运行期间关节明显失控："
+                f"joint={max_error_index}, error={max_error:.4f} rad, "
+                f"actual={max_error_actual:+.4f}, "
+                f"target={max_error_target:+.4f}"
+            )
+
+        return (
+            q,
+            dq,
+            max_error,
+            max_error_index,
+            max_error_actual,
+            max_error_target,
+        )
+
+    def _freeze_at_measured_position(self) -> None:
+        writer = self._writer
+        if writer is None:
+            raise RuntimeError("没有 LowCmd writer")
+        q, _, _, _, age = self._cache.snapshot()
+        if len(q) != EXPECTED_MOTOR_SLOTS or age > STATE_STALE_TIMEOUT:
+            raise RuntimeError("无法获取可靠实测位置")
+        writer.update_targets({index: q[index] for index in CONTROL_INDICES})
+
+    def _validate_trajectory(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[Optional[str], str, Optional[Dict[str, Any]]]:
+        raw_joint_names = payload.get("joint_names")
+        raw_points = payload.get("points")
+        if not isinstance(raw_joint_names, list):
+            return "joint_names 格式错误", "unknown", None
+        if not isinstance(raw_points, list):
+            return "points 格式错误", "unknown", None
+
+        joint_names = [str(name) for name in raw_joint_names]
+        if not joint_names:
+            return "joint_names 为空", "unknown", None
+        if len(joint_names) != len(set(joint_names)):
+            return "joint_names 存在重复名称", "unknown", None
+
+        group_name = "unknown"
+        received = set(joint_names)
+        for candidate, expected in EXPECTED_GROUPS.items():
+            if received == set(expected):
+                group_name = candidate
+                break
+        if group_name == "unknown":
+            return "关节集合不是左臂、右臂或双臂", group_name, None
+        if not raw_points:
+            return "轨迹没有 point", group_name, None
+
+        q, _, _, _, age = self._cache.snapshot()
+        if len(q) != EXPECTED_MOTOR_SLOTS or age > STATE_STALE_TIMEOUT:
+            return "当前 LowState 不可靠", group_name, None
+
+        joint_count = len(joint_names)
+        previous_time = -1.0
+        previous_positions: Optional[List[float]] = None
+        normalized_points: List[Dict[str, Any]] = []
+
+        for point_index, raw_point in enumerate(raw_points, start=1):
+            if not isinstance(raw_point, dict):
+                return f"point {point_index} 格式错误", group_name, None
+            raw_positions = raw_point.get("positions")
+            raw_velocities = raw_point.get("velocities", [])
+            raw_accelerations = raw_point.get("accelerations", [])
+            raw_time_ns = raw_point.get("time_from_start_ns")
+            if not isinstance(raw_positions, list) or len(raw_positions) != joint_count:
+                return f"point {point_index} positions 数量错误", group_name, None
+            if not isinstance(raw_velocities, list):
+                return f"point {point_index} velocities 格式错误", group_name, None
+            if raw_velocities and len(raw_velocities) != joint_count:
+                return f"point {point_index} velocities 数量错误", group_name, None
+            if not isinstance(raw_accelerations, list):
+                return f"point {point_index} accelerations 格式错误", group_name, None
+            if raw_accelerations and len(raw_accelerations) != joint_count:
+                return f"point {point_index} accelerations 数量错误", group_name, None
+            if isinstance(raw_time_ns, bool) or not isinstance(raw_time_ns, int):
+                return f"point {point_index} time_from_start_ns 格式错误", group_name, None
+
+            try:
+                positions = [float(value) for value in raw_positions]
+            except (TypeError, ValueError):
+                return f"point {point_index} positions 含非数值", group_name, None
+            if not all(math.isfinite(value) for value in positions):
+                return f"point {point_index} 位置含非有限值", group_name, None
+
+            point_time = float(raw_time_ns) * 1e-9
+            if point_time < 0.0 or point_time <= previous_time:
+                return f"point {point_index} time_from_start 非法", group_name, None
+
+            if previous_positions is None:
+                start_errors = [
+                    abs(positions[offset] - q[JOINT_TO_INDEX[name]])
+                    for offset, name in enumerate(joint_names)
+                ]
+                if max(start_errors, default=0.0) > MAX_START_TARGET_ERROR:
+                    return (
+                        f"首点与实测当前位置差异过大：max={max(start_errors):.4f} rad",
+                        group_name,
+                        None,
+                    )
+                if point_time > 0.0:
+                    for offset, name in enumerate(joint_names):
+                        delta = abs(positions[offset] - q[JOINT_TO_INDEX[name]])
+                        if delta > MAX_TRAJECTORY_INCREMENT:
+                            return (
+                                f"起点到首点增量过大：{name}={delta:.4f} rad",
+                                group_name,
+                                None,
+                            )
+                        if delta / point_time > MAX_SEGMENT_SPEED:
+                            return (
+                                f"起点到首点分段速度过大：{name}={delta / point_time:.4f} rad/s",
+                                group_name,
+                                None,
+                            )
+            else:
+                dt = point_time - previous_time
+                for offset, name in enumerate(joint_names):
+                    delta = abs(positions[offset] - previous_positions[offset])
+                    if delta > MAX_TRAJECTORY_INCREMENT:
+                        return (
+                            f"point {point_index} 增量过大：{name}={delta:.4f} rad",
+                            group_name,
+                            None,
+                        )
+                    if delta / dt > MAX_SEGMENT_SPEED:
+                        return (
+                            f"point {point_index} 分段速度过大：{name}={delta / dt:.4f} rad/s",
+                            group_name,
+                            None,
+                        )
+
+            normalized_points.append(
+                {"positions": positions, "time_from_start": point_time}
+            )
+            previous_positions = positions
+            previous_time = point_time
+
+        if previous_time <= 0.0:
+            return "轨迹总时长必须大于 0", group_name, None
+        if previous_time > MAX_TRAJECTORY_DURATION:
+            return (
+                f"轨迹时长 {previous_time:.3f}s 超过 {MAX_TRAJECTORY_DURATION:.1f}s",
+                group_name,
+                None,
+            )
+        return (
+            None,
+            group_name,
+            {"joint_names": joint_names, "points": normalized_points},
+        )
+
+    def _wait_for_ai_ready(self, timeout: float) -> None:
+        assert self._msc is not None
+        deadline = time.monotonic() + timeout
+        last_result = None
+        self._msc.SetTimeout(CHECK_MODE_TIMEOUT)
+        while time.monotonic() < deadline:
+            code, current = self._msc.CheckMode()
+            last_result = (code, current)
+            self._log("info", f"启用前 CheckMode：code={code}, mode={current}")
+            if code == 0 and current is not None:
+                name = current.get("name", "")
+                if name == "ai":
+                    return
+                raise RuntimeError(f"启动前模式不是 ai：{current}")
+            time.sleep(0.20)
+        raise RuntimeError(f"等待 ai 模式确认超时，最后结果={last_result}")
+
+    def _release_ai_mode(self) -> None:
+        assert self._msc is not None
+        self._msc.SetTimeout(RELEASE_MODE_TIMEOUT)
+        code, _ = self._msc.ReleaseMode()
+        self._log("warning", f"ReleaseMode：code={code}")
+        if code not in (0, RPC_TIMEOUT_CODE):
+            raise RuntimeError(f"ReleaseMode 明确失败：code={code}")
+
+        self._msc.SetTimeout(CHECK_MODE_TIMEOUT)
+        deadline = time.monotonic() + RELEASE_VERIFY_TIMEOUT
+        last_result = None
+        while time.monotonic() < deadline:
+            check_code, current = self._msc.CheckMode()
+            last_result = (check_code, current)
+            self._log(
+                "info", f"释放验证 CheckMode：code={check_code}, mode={current}"
+            )
+            if check_code == 0 and current is not None:
+                name = current.get("name", "")
+                if name == "":
+                    return
+                if name not in ("ai", ""):
+                    raise RuntimeError(f"释放期间出现未知模式：{current}")
+            time.sleep(0.20)
+        raise RuntimeError(
+            f"ReleaseMode 结果未在 {RELEASE_VERIFY_TIMEOUT:.0f}s 内确认：{last_result}"
+        )
+
+    def _check_ai_once(self) -> bool:
+        assert self._msc is not None
+        self._msc.SetTimeout(CHECK_MODE_TIMEOUT)
+        code, current = self._msc.CheckMode()
+        return code == 0 and current is not None and current.get("name") == "ai"
+
+    def _restore_ai_mode(self, timeout: Optional[float]) -> bool:
+        assert self._msc is not None
+        writer = self._writer
+        if writer is None:
+            return self._check_ai_once()
+
+        self._log("warning", "正在恢复 ai；确认成功前继续发布原位保持 LowCmd")
+        deadline = None if timeout is None else time.monotonic() + timeout
+        next_select_time = 0.0
+        next_check_time = 0.0
+        last_check = None
+
+        while True:
+            try:
+                writer.raise_if_failed()
+            except Exception as exc:
+                self._log(
+                    "error",
+                    f"LowCmd writer 异常：{exc}；继续尝试恢复 ai，异常时按实体急停",
+                )
+
+            now = time.monotonic()
+            if now >= next_check_time:
+                self._msc.SetTimeout(CHECK_MODE_TIMEOUT)
+                code, current = self._msc.CheckMode()
+                value = (code, repr(current))
+                if value != last_check:
+                    self._log(
+                        "info", f"恢复期间 CheckMode：code={code}, mode={current}"
+                    )
+                    last_check = value
+                if code == 0 and current is not None and current.get("name") == "ai":
+                    self._log("info", "已确认 ai 模式恢复")
+                    return True
+                next_check_time = time.monotonic() + 0.50
+
+            now = time.monotonic()
+            if now >= next_select_time:
+                self._msc.SetTimeout(SELECT_MODE_TIMEOUT)
+                select_code, _ = self._msc.SelectMode("ai")
+                self._log("warning", f"SelectMode('ai')：code={select_code}")
+                next_select_time = time.monotonic() + SELECT_RETRY_INTERVAL
+
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(0.10)
+
+    def _validate_frontend_lowcmd_preflight(
+        self, payload: Dict[str, Any]
+    ) -> None:
+        publishers = payload.get("lowcmd_publishers")
+        subscriptions = payload.get("lowcmd_subscriptions")
+        stamp = payload.get("preflight_monotonic")
+        if isinstance(publishers, bool) or not isinstance(publishers, int):
+            raise RuntimeError("缺少有效的 /lowcmd Publisher 预检结果")
+        if isinstance(subscriptions, bool) or not isinstance(subscriptions, int):
+            raise RuntimeError("缺少有效的 /lowcmd Subscription 预检结果")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            raise RuntimeError("缺少有效的 /lowcmd 预检时间")
+        age = time.monotonic() - float(stamp)
+        if age < 0.0 or age > LOWCMD_PREFLIGHT_MAX_AGE:
+            raise RuntimeError(f"/lowcmd 预检结果已过期：age={age:.3f}s")
+        if publishers != 0 or subscriptions != 1:
+            raise RuntimeError(
+                f"/lowcmd 安全基线不满足：publishers={publishers}, "
+                f"subscriptions={subscriptions}；要求 0/1"
+            )
+        self._log("info", "/lowcmd ROS 前端预检通过：Publisher=0, Subscription=1")
+
+    def _state_payload(self) -> Dict[str, Any]:
+        with self._state_lock:
+            state = self._state
+        with self._execution_lock:
+            goal_id = self._active_goal_id or ""
+        _, _, mode_machine, mode_pr, age = self._cache.snapshot()
+        return {
+            "state": state,
+            "active_goal_id": goal_id,
+            "lowcmd_active": self._writer is not None,
+            "high_level_released": self._high_level_released,
+            "mode_machine": mode_machine,
+            "mode_pr": mode_pr,
+            "lowstate_age": age,
+        }
+
+    def _publish_status(self, goal_id: str, state: str, message: str) -> None:
+        payload = {
+            "version": PROTOCOL_VERSION,
+            "kind": "trajectory_status",
+            "goal_id": goal_id,
+            "state": state,
+            "message": message,
+            "stamp_monotonic": time.monotonic(),
+        }
+        self._send_event(payload)
+        level = "warning" if state in {"rejected", "aborted", "canceled"} else "info"
+        print(f"[{level}] [{state}] goal={goal_id}: {message}", flush=True)
+
+    def _send_backend_state(self, message: str) -> None:
+        payload = {
+            "version": PROTOCOL_VERSION,
+            "kind": "backend_state",
+            "message": message,
+            "stamp_monotonic": time.monotonic(),
+        }
+        payload.update(self._state_payload())
+        self._send_event(payload)
+
+    def _send_event(self, message: Dict[str, Any]) -> None:
+        with self._connection_lock:
+            connection = self._client
+        if connection is None:
+            return
+        try:
+            connection.send(message)
+        except Exception:
+            pass
+
+    def _send_response(
+        self,
+        connection: FramedSocket,
+        request_id: str,
+        success: bool,
+        message: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "version": PROTOCOL_VERSION,
+            "kind": "response",
+            "request_id": request_id,
+            "success": bool(success),
+            "message": message,
+        }
+        if extra:
+            payload.update(extra)
+        connection.send(payload)
+
+    def _log(self, level: str, message: str) -> None:
+        print(f"[{level}] {message}", flush=True)
+        self._send_event(
+            {
+                "version": PROTOCOL_VERSION,
+                "kind": "log",
+                "level": level,
+                "message": message,
+                "stamp_monotonic": time.monotonic(),
+            }
+        )
+
+    def _on_frontend_disconnect(self) -> None:
+        with self._execution_lock:
+            active = self._execution_thread is not None and self._execution_thread.is_alive()
+        if active:
+            self._log(
+                "warning",
+                "ROS 前端断开；已请求取消活动轨迹，后端将保持实测当前位置",
+            )
+            self._cancel_event.set()
+        with self._state_lock:
+            state = self._state
+        if state in {"ARMED", "RECOVERY_REQUIRED", "DISABLING", "ENABLING"}:
+            self._log(
+                "warning",
+                f"前端断开时后端状态为 {state}；不会停止 LowCmd，请重连后显式停用",
+            )
+
+    def _acquire_single_instance_lock(self) -> None:
+        lock_path = self._socket_path + ".lock"
+        self._lock_file = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("已有另一个 Unitree DDS 后端实例正在运行") from exc
+        self._lock_file.seek(0)
+        self._lock_file.truncate()
+        self._lock_file.write(str(os.getpid()))
+        self._lock_file.flush()
+
+    def _create_server_socket(self) -> None:
+        try:
+            os.unlink(self._socket_path)
+        except FileNotFoundError:
+            pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(self._socket_path)
+        os.chmod(self._socket_path, 0o600)
+        sock.listen(1)
+        sock.settimeout(SOCKET_ACCEPT_TIMEOUT)
+        self._server_socket = sock
+
+    def request_shutdown(self) -> None:
+        self._shutdown_requested.set()
+        self._cancel_event.set()
+        if self._server_socket is not None:
+            try:
+                self._server_socket.close()
+            except OSError:
+                pass
+        with self._connection_lock:
+            connection = self._client
+            self._client = None
+        if connection is not None:
+            connection.close()
+
+    def safe_shutdown(self) -> None:
+        self.request_shutdown()
+
+        thread = self._execution_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+
+        if self._writer is not None:
+            self._log(
+                "warning",
+                "后端关闭前必须恢复 ai；确认成功前继续保持，请勿强制结束",
+            )
+            self._restore_ai_mode(timeout=None)
+            self._writer.stop()
+            self._writer = None
+            self._release_lowcmd_publisher()
+            self._high_level_released = False
+            with self._state_lock:
+                self._state = "DISARMED"
+        else:
+            self._release_lowcmd_publisher()
+
+        try:
+            os.unlink(self._socket_path)
+        except FileNotFoundError:
+            pass
+        if self._lock_file is not None:
+            try:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._lock_file.close()
+                self._lock_file = None
+
+
+def main() -> None:
+    backend = UnitreeTrajectoryBackend(interface="eth0")
+
+    def request_shutdown(_signum, _frame) -> None:
+        backend.request_shutdown()
+
+    signal.signal(signal.SIGINT, request_shutdown)
+    signal.signal(signal.SIGTERM, request_shutdown)
+
+    try:
+        backend.serve_forever()
+    finally:
+        backend.safe_shutdown()
+
+
+if __name__ == "__main__":
+    main()

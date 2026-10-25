@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "role": "hand_board",
+  "allows_arm": false,
+  "allows_real_execution": false,
+  "processes": [
+    {
+      "name": "rh56h1_udp_driver",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 30.0,
+      "ready_patterns": ["RH56H1 UDP driver started"],
+      "command": "set -eo pipefail; exec @PROJECT_ROOT@/onboard/startup/run_rh56h1_service.sh driver"
+    },
+    {
+      "name": "rh56h1_mapper",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 30.0,
+      "ready_patterns": ["RH56H1 virtual gripper mapper v5 started"],
+      "command": "set -eo pipefail; exec @PROJECT_ROOT@/onboard/startup/run_rh56h1_service.sh mapper"
+    },
+    {
+      "name": "rh56h1_controller",
+      "startup_grace_sec": 2.0,
+      "ready_timeout_sec": 30.0,
+      "ready_patterns": ["RH56H1 virtual gripper controller started"],
+      "command": "set -eo pipefail; exec @PROJECT_ROOT@/onboard/startup/run_rh56h1_service.sh controller"
+    }
+  ]
+}

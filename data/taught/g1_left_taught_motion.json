@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "artifact_type": "g1_left_taught_motion",
+  "raw_source": "/home/yii/下载/left_grasp_ready_teach_raw.json",
+  "raw_source_sha256": "c41b69ff1d732922d7117ead4e8de4625abd8c59828ba20384da74b9a26c1aed",
+  "raw_sample_count": 622,
+  "raw_duration_sec": 24.998782960000426,
+  "joint_names": [
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint"
+  ],
+  "excluded_context_joints": [
+    "Yaw_Joint",
+    "torso_Joint"
+  ],
+  "waist_replay_disabled": true,
+  "filter": {
+    "median_window_samples": 5,
+    "zero_phase_triangular_weights": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      4,
+      3,
+      2,
+      1
+    ],
+    "maximum_correction_rad_by_joint": [
+      0.008551463503390547,
+      0.01364908218383798,
+      0.008440752029418963,
+      0.013950610756874093,
+      0.014977883100509626,
+      0.020239914059638986,
+      0.005562115907669071
+    ]
+  },
+  "taught_start_positions_rad": [
+    0.07441005110740662,
+    0.06711166352033615,
+    -1.556870698928833,
+    1.5321831703186035,
+    -1.5672130584716797,
+    -0.005656554363667965,
+    0.0007070692954584956
+  ],
+  "taught_end_positions_rad": [
+    -0.5914565277099609,
+    1.5207982063293457,
+    -0.8965585708618165,
+    -0.47354995369911196,
+    -0.027376285269856453,
+    0.29691349625587465,
+    -0.11595361053943634
+  ],
+  "initial_stable_sample_count": 34,
+  "initial_stable_duration_sec": 1.3394088650002232,
+  "motion_onset_source_sec": 1.1667524499998763,
+  "stable_end_window_start_source_sec": 10.919298859000264,
+  "stable_end_window_end_source_sec": 10.919298859000264,
+  "stable_end_window_duration_sec": 0.0,
+  "stable_end_window_max_range_rad": 0.0,
+  "source_motion_duration_sec": 9.752546409000388,
+  "discarded_tail_duration_sec": 14.079484101000162,
+  "selected_endpoint_filtered_tcp_z_m": 0.05881290494089368,
+  "endpoint_policy": "user-confirmed jitter begins near 11 s; select the highest filtered TCP sample in that jitter region as the fixed endpoint and discard every later sample",
+  "relay_time_scale_compensation": 5.4,
+  "replay_slowdown": 2.2,
+  "requested_segment_time_compression": 0.9,
+  "applied_segment_time_compression": 1.0,
+  "retime_speed_cap_rad_sec": 0.3,
+  "estimated_max_acceleration_before_retime_rad_sec2": 0.8065522253509511,
+  "estimated_max_acceleration_after_retime_rad_sec2": 0.8065522253509511,
+  "input_trajectory_duration_sec": 4.022406018,
+  "expected_after_relay_duration_sec": 21.7209924972,
+  "relay_final_settle_sec": 3.0,
+  "expected_total_after_relay_sec": 24.7209924972,
+  "maximum_speed_after_relay_rad_sec": 0.3000000089331454,
+  "point_count": 245,
+  "maximum_point_step_rad": 0.030335428118705765,
+  "trajectory_sha256": "1b9f59b98aaab4cf6104759132fcb9b6472a0baf842cdf2b18e49af677798eda",
+  "fresh_plan_required_for_every_new_measured_start": true
+}

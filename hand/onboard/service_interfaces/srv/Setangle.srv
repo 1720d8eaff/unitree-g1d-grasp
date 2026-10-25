@@ -1,0 +1,18 @@
+#接收的命令类型
+string status
+#灵巧手ID
+int32 hand_id
+#手指设置角度值
+# angle0-angle3 (手指1-4，除大拇指): 850-1600
+# angle4 (大拇指第一个数值): 950-1350
+# angle5 (大拇指第二个数值): 670-1700
+int32 angle0
+int32 angle1
+int32 angle2
+int32 angle3
+int32 angle4
+int32 angle5
+---
+# 是否发出成功
+bool angle_accepted
+
