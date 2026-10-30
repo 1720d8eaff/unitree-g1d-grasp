@@ -24,6 +24,7 @@ class ActionBuffer:
         self._lock = Lock()
         self._last_id = -1
         self._actions = ()
+        self._observed_at = None
 
     def replace(self, chunk: Chunk, state, now: float) -> tuple[bool, str]:
         state = tuple(state)
@@ -42,10 +43,21 @@ class ActionBuffer:
                 return False, "invalid_actions"
             self._last_id = chunk.request_id
             self._actions = tuple(tuple(a) for a in chunk.actions)
+            self._observed_at = chunk.observed_at
             return True, "accepted"
 
-    def pop(self):
+    def pop(self, now=None):
+        """Consume an action, optionally discarding a chunk that has aged out.
+
+        When provided, now must use the observation's monotonic clock.
+        """
+        if now is not None and not math.isfinite(now):
+            raise ValueError("now must be finite")
         with self._lock:
+            if (now is not None and self._observed_at is not None
+                    and not 0 <= now - self._observed_at <= self.max_age):
+                self._actions = ()
+                self._observed_at = None
             if not self._actions:
                 return None
             action, self._actions = self._actions[0], self._actions[1:]

@@ -21,6 +21,15 @@ class BufferTests(unittest.TestCase):
         self.assertEqual(b.replace(Chunk(2, 2., (0.,), ((2.,),)), (1.,), 2.)[1], "state_mismatch")
         self.assertEqual(b.pop(), (1.,))
 
+    def test_action_expires_when_consumed_with_clock(self):
+        b = ActionBuffer(max_age=.5, max_state_error=.1)
+        self.assertTrue(b.replace(Chunk(0, 1., (0.,), ((1.,), (2.,))), (0.,), 1.1)[0])
+        self.assertEqual(b.pop(now=1.2), (1.,))
+        self.assertIsNone(b.pop(now=1.6))
+        self.assertTrue(b.needs_replan())
+        with self.assertRaises(ValueError):
+            b.pop(now=float('nan'))
+
 
 try:
     import torch

@@ -8,6 +8,8 @@
 
 A hardware-oriented manipulation stack for Unitree G1-D, integrating RGB-D perception, AnyGrasp candidate selection, MoveIt planning, an isolated ROS 2 / Unitree DDS trajectory bridge, and RH56H1 hand control.
 
+本仓库聚焦真机感知与执行工程，以及失败表征和异步动作管理组件；配套的 [FailureVLA](https://github.com/1720d8eaff/FailureVLA) 仓库提供操作轨迹和状态历史预测基线。
+
 本仓库整理自 **2026-09-11 v0.3.14 开发交接快照**。采用板端与上位机分离的工程结构，保留原始控制源码、参考数据和完整性检查；历史日志、运行结果、重复发布压缩包与旧 Git 元数据不进入源码仓库。
 
 ## 实现范围
