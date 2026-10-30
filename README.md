@@ -16,6 +16,7 @@ A hardware-oriented manipulation stack for Unitree G1-D, integrating RGB-D perce
 - **两阶段运动规划**：示教轨迹与实时抓取目标衔接；结合手动示教 TCP 姿态、IK 搜索、碰撞检查、腕部约束和 RViz 审阅。
 - **板端执行与反馈**：ROS 2 轨迹前端与 **500 Hz Unitree DDS 后端**通过本地 IPC 分离，保留有界终点反馈 V2。
 - **RH56H1 灵巧手链路**：上位机 UDP / RS485 网关，板端驱动、映射器、控制器与 ROS 消息定义。
+- **失败感知与异步动作组件**：短时状态历史编码、失败/进度预测、动作残差适配、困难样本重采样与状态对齐的动作块替换。详见 [VLA 组件说明](docs/FAILURE_AWARE_VLA.md)。
 - **可追溯工程管理**：几何配置、示教输入、板端来源哈希、独立运行目录和离线完整性测试。
 
 版本内包含经人工确认后执行保存轨迹的独立脚本。默认管理入口 `g1dctl` 提供离线诊断和 **Plan-only**，不提供 ARM / DISARM。具体执行前提见[开发指南](docs/DEVELOPER_GUIDE.md)与[操作约束](docs/SAFETY.md)。
@@ -67,6 +68,7 @@ unitree-g1d-grasp/
 ├── config/                     # 进程、几何、执行策略与外部环境路径
 ├── data/                       # 原始示教、245 点参考轨迹与标定数据
 ├── tools/                      # CLI、进程管理、打包与校验工具
+├── vla/                        # 失败表征与异步动作缓冲
 ├── tests/                      # 不依赖真机的项目完整性测试
 ├── docs/                       # 启动、部署、架构、来源与版本记录
 ├── imports/onboard/            # 哈希绑定的板端原始来源包
@@ -117,6 +119,7 @@ python3 tools/package_board_bundle.py
 | 文档 | 内容 |
 | --- | --- |
 | [文档索引](docs/README.md) | 当前文档与历史资料入口 |
+| [失败感知 VLA 组件](docs/FAILURE_AWARE_VLA.md) | 训练接口与异步动作缓冲 |
 | [架构](docs/ARCHITECTURE.md) | 数据流、进程与环境边界 |
 | [开发指南](docs/DEVELOPER_GUIDE.md) | 原交接版操作说明、规划策略与审阅流程 |
 | [启动与部署](docs/STARTUP.md) | 板端、上位机与手部服务 |
@@ -128,5 +131,3 @@ python3 tools/package_board_bundle.py
 ## 来源与许可
 
 保留各 ROS 包及文件中已有的来源与许可声明，详见[来源和许可说明](docs/PROVENANCE_AND_LICENSES.md)。本次整理未为第三方代码附加新的统一许可证，也未收录 AnyGrasp 商业 SDK、模型权重或外部环境安装目录。
-
-仓库内容对应本次提供的抓取工程快照；VLA 训练、微调权重和完整示范数据集不在本快照内。
