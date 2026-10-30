@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,7 +32,8 @@ class ProjectIntegrityTests(unittest.TestCase):
         ):
             path = ROOT / command
             self.assertTrue(path.is_file())
-            self.assertTrue(path.stat().st_mode & 0o111)
+            if os.name == "posix":
+                self.assertTrue(path.stat().st_mode & 0o111)
 
     def test_v2_backend_hash_is_pinned(self):
         config = load_json("config/endpoint_feedback_v2.json")
@@ -491,6 +493,7 @@ class ProjectIntegrityTests(unittest.TestCase):
         self.assertIn('"teach-calibrate"', controller)
         self.assertIn("CALIBRATION_RECORDER", controller)
 
+    @unittest.skipUnless(os.name == "posix", "process_supervisor requires fcntl")
     def test_supervisor_stops_siblings_when_one_child_exits(self):
         config = {
             "schema_version": 1,
