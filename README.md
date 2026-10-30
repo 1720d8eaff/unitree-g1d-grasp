@@ -10,6 +10,10 @@ A hardware-oriented manipulation stack for Unitree G1-D, integrating RGB-D perce
 
 本仓库聚焦真机感知与执行工程，以及失败表征和异步动作管理组件；配套的 [FailureVLA](https://github.com/1720d8eaff/FailureVLA) 仓库提供操作轨迹和状态历史预测基线。
 
+独立的物体中心容器操作项目见 [ContainerLoop-VLA](https://github.com/1720d8eaff/ContainerLoop-VLA)。
+
+`integrations/failurevla_bridge.py` 提供策略与机器人系统之间的回调式接口：刷新观测后，依据候选评分、碰撞与可达性检查选择规划结果。该接口复用调用方提供的感知、规划和执行能力，执行回调须显式配置。验证范围见 [简历证据索引](docs/RESUME_EVIDENCE.md)。
+
 本仓库整理自 **2026-09-11 v0.3.14 开发交接快照**。采用板端与上位机分离的工程结构，保留原始控制源码、参考数据和完整性检查；历史日志、运行结果、重复发布压缩包与旧 Git 元数据不进入源码仓库。
 
 ## 实现范围
