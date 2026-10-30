@@ -9,4 +9,9 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install pytest
-      - run: python -m pytest -q tests/test_synthetic_buffer.py
+      - run: python -m pytest -q tests/test_synthetic_buffer.py tests/test_ipc_behavior.py
+      - run: python tools/timing_probe.py --output ci-timing
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-timing
+          path: ci-timing/

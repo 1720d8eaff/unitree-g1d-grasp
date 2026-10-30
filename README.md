@@ -91,6 +91,10 @@ unitree-g1d-grasp/
 
 ## 快速开始：离线检查
 
+行为验证可运行 `python -m pytest -q tests/test_ipc_behavior.py tests/test_synthetic_buffer.py`：实际本地 socket 检查生产 IPC 的序列化、断连、超长报文拒绝，并回放 ActionBuffer 到达顺序。不是只有哈希检查。
+
+`python tools/timing_probe.py` 读取现有 DDS 后端的 `CONTROL_DT=0.002`，测量本机 OS 调度误差并保存逐周期日志到 `artifacts/timing/`。此工具不发布 DDS 命令，其结果不等于真机 500 Hz 达标记录。真实后端实现位于 `onboard/trajectory_bridge/g1_d_trajectory_bridge/trajectory_backend.py` 的持续发布线程。原 ARM、限位和人工审阅机制保持不变。
+
 仅需 **Linux + Python 3.10 或更高版本**，无需 ROS、模型权重或机器人连接：
 
 ```bash

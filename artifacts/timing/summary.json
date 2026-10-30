@@ -1,0 +1,11 @@
+{
+  "source": "host_scheduling_probe",
+  "backend_sha256": "23f7a936cb7ce234da8453fb6d84b72be54253e1e1852c3218a92ec844f31bee",
+  "target_period_s": 0.002,
+  "ticks": 500,
+  "lateness_p50_s": 0.0003208014531992376,
+  "lateness_p95_s": 0.0005508029134944081,
+  "over_period_count": 1,
+  "elapsed_s": 0.9980466999986675,
+  "scope": "OS sleep scheduling only; no DDS publish or robot movement"
+}
