@@ -103,6 +103,8 @@ python3 -m unittest discover -s tests -v
 
 测试包含配置与哈希核对，以及使用临时虚拟进程检查 supervisor 联动退出，不会连接机器人或发送动作。Windows 用户可在 WSL 中运行。
 
+`python -m pytest -q tests/test_synthetic_buffer.py` 使用 `synthetic_sdv` 合成事件测试 ActionBuffer；这些样本不是机器人运行记录。
+
 ## 部署入口
 
 实际运行需要分别配置 ROS 2、MoveIt、Unitree SDK / DDS、AnyGrasp SDK 与权重、相机和串口环境，见[运行依赖](docs/DEPENDENCIES.md)。`config/external_paths.json` 与部分启动脚本保留参考机器路径，部署时需按目标机器调整。
